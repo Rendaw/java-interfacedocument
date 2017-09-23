@@ -1,16 +1,35 @@
 package com.zarbosoft.interfacedocument;
 
 import org.jsoup.nodes.Document;
+import org.jsoup.nodes.TextNode;
 
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 public class FluentJSoup {
-	public static class Element {
+	public static class Node {
+		private final org.jsoup.nodes.Node node;
+
+		public Node(final org.jsoup.nodes.Node node) {
+			this.node = node;
+		}
+
+		public void setText(final String text) {
+			if (node instanceof TextNode)
+				((TextNode) node).text(text);
+			else if (node instanceof org.jsoup.nodes.Element)
+				((org.jsoup.nodes.Element) node).text(text);
+			else
+				throw new AssertionError();
+		}
+	}
+
+	public static class Element extends Node {
 
 		private final org.jsoup.nodes.Element element;
 
 		private Element(final org.jsoup.nodes.Element element) {
+			super(element);
 			this.element = element;
 		}
 
@@ -52,12 +71,12 @@ public class FluentJSoup {
 			return this;
 		}
 
-		public Element with(final Element element) {
-			this.element.appendChild(element.element);
+		public Element with(final Node node) {
+			this.element.appendChild(node.node);
 			return this;
 		}
 
-		public Element with(final Stream<Element> elements) {
+		public Element with(final Stream<Node> elements) {
 			elements.forEach(e -> Element.this.with(e));
 			return this;
 		}
@@ -150,12 +169,8 @@ public class FluentJSoup {
 			return with("li", inner);
 		}
 
-		public Element br(final String text) {
-			return with("br", text);
-		}
-
-		public Element br(final Consumer<Element> inner) {
-			return with("br", inner);
+		public Element br() {
+			return with("br", "");
 		}
 
 		public Element a(final String text) {
@@ -265,6 +280,10 @@ public class FluentJSoup {
 
 	public static Element html() {
 		return new Element(new org.jsoup.nodes.Document(null));
+	}
+
+	public static Node text(final String text) {
+		return new Node(new org.jsoup.nodes.TextNode(text, null));
 	}
 
 	public static Element head() {

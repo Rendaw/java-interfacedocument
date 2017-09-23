@@ -1,5 +1,6 @@
 package com.zarbosoft.interfacedocument;
 
+import com.google.common.collect.ImmutableList;
 import com.zarbosoft.interface1.Walk;
 import com.zarbosoft.rendaw.common.ChainComparator;
 import com.zarbosoft.rendaw.common.Common;
@@ -16,11 +17,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.function.Function;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.zarbosoft.rendaw.common.Common.uncheck;
@@ -31,20 +31,19 @@ public class Documenter {
 		LUA
 	}
 
-	public static void document(
+	public static boolean document(
 			final Reflections reflections,
 			final Map<String, String> descriptions,
 			final Path out,
 			final Flavor flavor,
 			final String prefix,
-			final Walk.TypeInfo root,
-			final List<String> shorten
+			final Walk.TypeInfo root
 	) {
 		final Map<Type, FluentJSoup.Element> types = new HashMap<>();
 		final FluentJSoup.Element toc = FluentJSoup.div();
 		final List<String> missingDescriptions = new ArrayList<>();
 		final Map<String, String> extraDescriptions = new HashMap<>(descriptions);
-		final Function<String, String> getDescription = s -> {
+		final Function<String, Stream<FluentJSoup.Node>> getDescription = s -> {
 			String d = extraDescriptions.remove(s);
 			if (d == null)
 				d = descriptions.get(s);
@@ -52,8 +51,27 @@ public class Documenter {
 				missingDescriptions.add(s);
 				d = "";
 			}
-			return d;
+			return transformText(d);
 		};
+
+		final Map<Type, List<FluentJSoup.Node>> shortNodes = new HashMap<>();
+		final Map<String, Integer> shortCounts = new HashMap<>();
+		final Function<Type, FluentJSoup.Node> shorten = type -> {
+			final List<FluentJSoup.Node> list = shortNodes.computeIfAbsent(type, t -> new ArrayList<>());
+			if (list.isEmpty()) {
+				final List<String> splits = Arrays.asList(type.getTypeName().split("\\."));
+				for (int i = 1; i < splits.size(); ++i) {
+					final String key =
+							splits.subList(splits.size() - i, splits.size()).stream().collect(Collectors.joining("."));
+					shortCounts.compute(key, (k2, count) -> (count == null ? 0 : count) + 1);
+				}
+			}
+			final FluentJSoup.Node o = FluentJSoup.text("");
+			list.add(o);
+			return o;
+		};
+
+		// Build body and toc
 		final FluentJSoup.Element rootElement = Walk.walk(reflections, root, new Walk.Visitor<FluentJSoup.Element>() {
 			public FluentJSoup.Element visitString(final Field field) {
 				return FluentJSoup.span().text("Any string");
@@ -74,19 +92,18 @@ public class Documenter {
 			public FluentJSoup.Element visitEnum(final Field field, final Class<?> enumClass) {
 				if (!types.containsKey(enumClass)) {
 					final FluentJSoup.Element section = FluentJSoup.div();
-					section.a(a -> a.text("top").withClass("totop").attr("href", "#top"));
 					section.a(a -> a.attr("name", enumClass.getTypeName()));
-					section.h2(shorten(shorten, enumClass));
-					section.p(getDescription.apply(enumClass.getCanonicalName()));
-					final FluentJSoup.Element values = FluentJSoup.ul().withClass("definitions");
+					section.h2(h2 -> h2.with(shorten.apply(enumClass)));
+					section.p(p -> p.with(getDescription.apply(enumClass.getCanonicalName())));
+					final FluentJSoup.Element values = FluentJSoup.ul();
 					section.with(values);
 					Walk.enumValues(enumClass).stream().forEach(pair -> {
 						final FluentJSoup.Element li =
 								FluentJSoup.li().code(code -> code.text(Walk.decideName(pair.second)));
-						li.span(getDescription.apply(String.format("%s/%s",
+						li.span(span -> span.with(getDescription.apply(String.format("%s/%s",
 								enumClass.getCanonicalName(),
 								pair.second.getName()
-						)));
+						))));
 						values.with(li);
 					});
 					types.put(enumClass, section);
@@ -94,7 +111,7 @@ public class Documenter {
 				return FluentJSoup
 						.a()
 						.attr("href", String.format("#%s", enumClass.getTypeName()))
-						.text(shorten(shorten, enumClass));
+						.with(shorten.apply(enumClass));
 			}
 
 			public FluentJSoup.Element visitList(final Field field, final FluentJSoup.Element inner) {
@@ -124,23 +141,19 @@ public class Documenter {
 				return FluentJSoup
 						.a()
 						.attr("href", String.format("#%s", klass.getTypeName()))
-						.text(shorten(shorten, klass));
+						.with(shorten.apply(klass));
 			}
 
 			public void visitConcrete(
 					final Field field, final Class<?> klass, final List<Pair<Field, FluentJSoup.Element>> fields
 			) {
 				final FluentJSoup.Element section = FluentJSoup.div();
-				section.a(a -> a.text("top").withClass("totop").attr("href", "#top"));
 				section.a(a -> a.attr("name", klass.getTypeName()));
-				section.h2(shorten(shorten, klass));
-				section.p(getDescription.apply(klass.getCanonicalName()));
+				section.h2(h2 -> h2.with(shorten.apply(klass)));
+				section.p(p -> p.with(getDescription.apply(klass.getCanonicalName())));
 				if (fields.isEmpty()) {
 					section.p("This type has no fields.");
 				} else {
-					final FluentJSoup.Element rows = FluentJSoup.table();
-					rows.tr(tr -> tr.withClass("fields").th("Fields").th(""));
-					section.with(rows);
 					final Common.Mutable<Object> instance = new Common.Mutable<>();
 					fields
 							.stream()
@@ -151,13 +164,12 @@ public class Documenter {
 							.forEach(pair -> {
 								final Field f = pair.first;
 								final String fieldName = Walk.decideName(f);
-								final FluentJSoup.Element inner = FluentJSoup.table().withClass("definitions");
-								final FluentJSoup.Element cell = FluentJSoup.td();
-								cell.p(getDescription.apply(String.format("%s/%s",
+								section.h4(String.format("field: %s", fieldName));
+								section.p(p -> p.with(getDescription.apply(String.format("%s/%s",
 										klass.getCanonicalName(),
 										f.getName()
-								)));
-								cell.with(inner);
+								))));
+								final FluentJSoup.Element inner = FluentJSoup.table();
 								inner.tr(tr -> tr.td("Values").td(td -> td.with(pair.second)));
 								inner.tr(tr -> tr.td("Required").
 										td(td -> {
@@ -201,7 +213,7 @@ public class Documenter {
 										inner.with(row);
 									}
 								}
-								rows.tr(tr -> tr.td(fieldName).with(cell));
+								section.with(inner);
 							});
 				}
 				types.put(klass, section);
@@ -212,6 +224,7 @@ public class Documenter {
 				return FluentJSoup.span().text("");
 			}
 		});
+		final boolean success;
 		if (!missingDescriptions.isEmpty() || !extraDescriptions.isEmpty()) {
 			System.out.format("\n\nMISSING\n");
 			for (final String error : missingDescriptions) {
@@ -222,18 +235,20 @@ public class Documenter {
 				System.out.format("%s\n", entry.getKey());
 			}
 			System.out.flush();
-			throw new AssertionError();
-		}
-		final Stream<FluentJSoup.Element> flavorIntroduction;
+			success = false;
+		} else
+			success = true;
+
+		// Build intro
+		final Stream<FluentJSoup.Node> flavorIntroduction;
 		switch (flavor) {
 			case LUXEM:
 				flavorIntroduction = Stream.of(FluentJSoup.h1().text("Introduction"),
 						FluentJSoup
 								.p()
-								.
-										text(String.format("This documentation describes the luxem format for %s.",
-												shorten(shorten, root.type)
-										))
+								.text("This documentation describes the luxem format for ")
+								.code(code -> code.with(shorten.apply(root.type)))
+								.text(".")
 								.text("  For a description of the syntax, see ")
 								.a(a -> a
 										.text("the luxem spec homepage")
@@ -243,16 +258,18 @@ public class Documenter {
 						FluentJSoup
 								.p()
 								.text("Also, if a type only has one required field, the field can be filled directly, so:"),
-						FluentJSoup.code().withClass("block").text("(repeat) { count: 4 }"),
+						FluentJSoup.code().text("(repeat) { count: 4 }"),
 						FluentJSoup.p().text("may be shortened to:"),
-						FluentJSoup.code().withClass("block").text("(repeat) 4")
+						FluentJSoup.code().text("(repeat) 4")
 				);
 				break;
 			case LUA:
 				flavorIntroduction = Stream.of(FluentJSoup.h1().text("Introduction"),
-						FluentJSoup.p().text(String.format("This documentation describes the Lua configuration for %s.",
-								shorten(shorten, root.type)
-						)),
+						FluentJSoup
+								.p()
+								.text("This documentation describes the Lua configuration for ")
+								.code(code -> code.with(shorten.apply(root.type)))
+								.text("."),
 						FluentJSoup
 								.p()
 								.text("Some values are typed.  Specify types with built-in unary functions which take the value to " +
@@ -271,6 +288,8 @@ public class Documenter {
 			default:
 				throw new DeadCode();
 		}
+
+		// Assemble body
 		final FluentJSoup.Element body = FluentJSoup
 				.div()
 				.with(flavorIntroduction)
@@ -286,41 +305,84 @@ public class Documenter {
 							.lesserFirst(o -> o.getKey().getTypeName())
 							.build())
 					.forEach(e -> {
-						toc.a(a -> a
-								.text(shorten(shorten, e.getKey()))
-								.attr("href", String.format("#%s", e.getKey().getTypeName())));
+						toc.div(div -> div.a(a -> a
+								.with(shorten.apply(e.getKey()))
+								.attr("href", String.format("#%s", e.getKey().getTypeName()))));
 						body.with(e.getValue());
+						body.br();
+						body.br();
 					});
 		}
+
+		// Resolve short names
+		for (final Map.Entry<Type, List<FluentJSoup.Node>> type : shortNodes.entrySet()) {
+			final List<String> splits = Arrays.asList(type.getKey().getTypeName().split("\\."));
+			boolean set = false;
+			for (int i = 1; i < splits.size(); ++i) {
+				final String key =
+						splits.subList(splits.size() - i, splits.size()).stream().collect(Collectors.joining("."));
+				if (shortCounts.get(key) > 1)
+					continue;
+				type.getValue().forEach(v -> v.setText(key));
+				set = true;
+				break;
+			}
+			if (!set)
+				type.getValue().forEach(v -> v.setText(type.getKey().getTypeName()));
+		}
+
 		try {
 			Files.createDirectories(out);
 			try (
-					OutputStream outStream = Files.newOutputStream(out.resolve("_Sidebar.md"),
+					OutputStream outStream = Files.newOutputStream(out.resolve("_Sidebar.rst"),
 							StandardOpenOption.WRITE,
 							StandardOpenOption.TRUNCATE_EXISTING,
 							StandardOpenOption.CREATE
 					)
 			) {
-				outStream.write(toc.render(4).getBytes(StandardCharsets.UTF_8));
+				Documenter.writeRst(outStream, toc);
 			}
 			try (
-					OutputStream outStream = Files.newOutputStream(out.resolve("Syntax-Reference.md"),
+					OutputStream outStream = Files.newOutputStream(out.resolve("Syntax-Reference.rst"),
 							StandardOpenOption.WRITE,
 							StandardOpenOption.TRUNCATE_EXISTING,
 							StandardOpenOption.CREATE
 					)
 			) {
-				outStream.write(body.render(4).getBytes(StandardCharsets.UTF_8));
+				Documenter.writeRst(outStream, body);
 			}
 		} catch (final IOException e) {
 			throw new UncheckedIOException(e);
 		}
+		return success;
 	}
 
-	private static String shorten(final List<String> strings, final Type type) {
-		String temp = type.getTypeName();
-		for (final String string : strings)
-			temp = temp.replaceAll(string, "");
-		return temp;
+	public static Stream<FluentJSoup.Node> transformText(final String text) {
+		final String[] codes = text.split("`");
+		final ImmutableList.Builder<FluentJSoup.Node> builder = ImmutableList.builder();
+		for (int i = 0; i < codes.length; ++i) {
+			if (i % 2 == 0) {
+				final String[] lines = codes[i].split("\n");
+				for (int j = 0; j < lines.length; ++j) {
+					if (j > 0)
+						builder.add(FluentJSoup.br());
+					builder.add(FluentJSoup.text(lines[j]));
+				}
+			} else {
+				builder.add(FluentJSoup.pre().text(codes[i]));
+			}
+		}
+		return builder.build().stream();
+	}
+
+	public static void writeRst(final OutputStream out, final FluentJSoup.Element body) {
+		uncheck(() -> {
+			out.write(".. raw:: html\n\n".getBytes(StandardCharsets.UTF_8));
+			out.write(Pattern
+					.compile("^", Pattern.MULTILINE)
+					.matcher(body.render(4))
+					.replaceAll("    ")
+					.getBytes(StandardCharsets.UTF_8));
+		});
 	}
 }
