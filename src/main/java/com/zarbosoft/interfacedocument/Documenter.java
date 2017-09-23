@@ -369,7 +369,7 @@ public class Documenter {
 					builder.add(FluentJSoup.text(lines[j]));
 				}
 			} else {
-				builder.add(FluentJSoup.pre().text(codes[i]));
+				builder.add(FluentJSoup.code().text(codes[i]));
 			}
 		}
 		return builder.build().stream();
